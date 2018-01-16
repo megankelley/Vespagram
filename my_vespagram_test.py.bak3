@@ -1,0 +1,201 @@
+# Created by M. Kelley on 20 November 2017
+# Output: a linear contour vespagram
+
+import obspy
+from obspy.clients.fdsn import Client
+from obspy.core.inventory import read_inventory
+import matplotlib.cm as cm
+import matplotlib.pyplot as plt
+from obspy.geodetics.base import locations2degrees
+import numpy as np
+import matplotlib
+
+#######################################
+
+def get_stations_waveforms(network, stations, channel, event_time, waveform_start, waveform_end):
+    
+    """
+    Retrieve an inventory of stations and a stream of waveforms from IRIS
+    
+    Args:
+        network:        String of ONE network
+        stations:       Comma-separated string of station codes in network
+        channel:        String of channel name
+        event_time:     obspy.UTCDateTime of event
+        waveform_start: Integer seconds after event_time to start waveform
+        waveform_end:   Integer seconds after event_time to end waveform
+       
+    Returns: obspy.Inventory and obspy.Stream for a chosen event
+    """
+    
+    # Retrieve the information
+    c = Client("IRIS")
+    inv = c.get_stations(network=network, station=stations, channel=channel, level="response")
+    st = c.get_waveforms(network=network, station=stations, location="", channel=channel, starttime=event_time+waveform_start, endtime=event_time+waveform_end) # Units of seconds
+
+    # Filter, remove the instrument response, normalize the data values to a maximum value of 1
+    st.attach_response(inv)
+    st.detrend("linear")
+    pre_filt = [0.005, 0.04, 5.0, 6.0]
+    st.remove_response(inventory=inv, pre_filt=pre_filt, output="DISP")
+    st.normalize()
+    
+    return inv, st
+
+#######################################
+    
+def make_record_section(stream, network, event_lat, event_lon, amp_factor):
+
+    """
+    Makes a plot of data traces arranged by their distance from an event
+    
+    Args:
+        stream:         obspy.Stream object, containing the waveform data
+        network:        String of ONE network
+        event_lat:      Latitude of the event, decimal format
+        event_lon:      Longitude of the event, decimal format
+        amp_factor:     A double format amplification factor for the amplitude of the traces in the plot
+       
+    Returns: a matplotlib figure saved as a .png file
+    """
+    
+    # Clear any existing figures
+    plt.clf()
+    
+    # Make the record section one trace at a time
+    for station, trace in zip(network, stream):
+        dist = locations2degrees(event_lat, event_lon, station.latitude, station.longitude)
+        data = trace.data
+        data *= amp_factor
+        data[:] += dist
+        dt = stream[0].stats.delta
+        time = [i*dt for i in range(len(data))]
+        plt.plot(time, data, label=station.code)
+        
+    plt.xlabel('Time (sec)')
+    plt.ylabel('Distance (deg)')
+    
+    # Save the figure
+    plt.savefig('record_section.png')
+
+#######################################
+
+def stack_waveforms(stream, network, event_lat, event_lon, slope, intercept):
+
+    """
+    Shifts a group of waveforms according to a given slowness and sums them
+    
+    Args:
+        stream:         obspy.Stream object, containing the waveform data
+        network:        String of ONE network
+        event_lat:      Latitude of the event, decimal format
+        event_lon:      Longitude of the event, decimal format
+        slowness:       The slowness (1/velocity = 1/slope) of the waveform across the array in sec/degree
+        intercept:      The y-intercept of the line that represents the arriving wavefront
+       
+    Returns: one summed waveform
+    """
+    
+    # Empty lists of things I need to make the vespagram later
+    names = []
+    data_shifts = []
+    
+    dt = stream[0].stats.delta
+    
+    # Fill the lists
+    for station, trace in zip(network, stream):
+        names.append(station.code)
+        dist = locations2degrees(event_lat, event_lon, station.latitude, station.longitude)
+        cross_pt = (dist-intercept)*slowness
+        slice_index = int(cross_pt/dt)
+        data_shifts.append(trace.data[slice_index:])
+        
+    # Trim data to the same size and reduce
+    short_trace_len = min([len(x) for x in data_shifts])
+    traces_sum = np.zeros(short_trace_len)
+    
+    for data in data_shifts:
+        data_trim = data[:short_trace_len]
+        traces_sum += data_trim
+    
+    inf_norm = np.max(traces_sum)
+    traces_sum[:] /= inf_norm
+    
+    return traces_sum
+
+#######################################
+
+# The following code will run if this file is executed as a script
+if __name__ == "__main__":
+
+    print " "
+    
+    # Define the time and location of the event
+    event_time = obspy.UTCDateTime("2013-05-24T14:56:31")
+    event_lat = 52.1357
+    event_lon = 151.5688
+    
+    # Test get_stations_waveforms function
+    inv, st = get_stations_waveforms("CI", "DAN,TUQ,GRA,SHO", "BHZ", event_time, 540, 1200)
+    print "Got %d stations and waveforms." % len(inv[0])
+
+    # Test the make_record_section function
+    #make_record_section(st, inv[0], event_lat, event_lon, 1.0)
+    #print "Made record section"
+    
+    # Define a range of slopes (1/slownesses) to investigate
+    slownesses = np.linspace(6.0, 7.0, 40)
+    slopes = [1.0/slowness for slowness in slownesses]
+
+    # Use the stack_waveforms function to make a summed trace for each of the defined slopes
+    trace_sums = []
+    for slowness in slownesses:
+        trace_sums.append(stack_waveforms(st, inv[0], event_lat, event_lon, slowness, 62.0))
+    print "Summed the shifted traces at each of the different slopes/slownesses."
+    
+    # Find the length of the shortest trace
+    short_trace_len = min([len(x) for x in trace_sums])
+    
+    # Trim each of the traces in trace_sums to be the length of the shortest trace
+    for i, trace in enumerate(trace_sums):
+        trace_sums[i] = trace[:short_trace_len]
+    print "Trimmed all the traces to the length of the shortest trace."
+    
+    # Axes for plots
+    dt = st[0].stats.delta
+    time = [i*dt for i in range(short_trace_len)]
+    
+    # Make a wiggle plot
+    #plt.clf()
+    #amp_factor = slownesses[1]-slownesses[0]
+    #for slowness, trace in zip(slownesses, trace_sums):
+    #    trace = trace * amp_factor 
+    #    trace = np.array(trace)
+    #    for i in range(len(trace)):
+    #        trace[i] += slowness
+    #    plt.plot(time, trace, '-k')
+    
+    #plt.xlim(min(time), max(time))
+    #plt.ylim(min(slownesses)-0.1, max(slownesses)+0.1)
+    #plt.xlabel('Time (sec)')
+    #plt.ylabel('Slowness (sec/deg)')
+    #plt.show()
+    
+    # Make a contour plot
+    
+    trace_matrix = np.zeros((len(slownesses), short_trace_len))
+    X, Y = np.meshgrid(time, slownesses)
+    for i in range(len(slownesses)):
+        trace_matrix[i,:] = trace_sums[i]
+    
+    plt.figure()
+    plt.contour(X, Y, trace_matrix, 6, colors='k')
+    matplotlib.rcParams['contour.negative_linestyle'] = 'solid'
+    
+    plt.xlim(min(time), max(time))
+    plt.ylim(min(slownesses), max(slownesses))
+    plt.xlabel('Time (sec)')
+    plt.ylabel('Slowness (sec/deg)')
+    plt.show()
+    
+    

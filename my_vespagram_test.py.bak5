@@ -1,0 +1,350 @@
+# First created by M. Kelley on 20 November 2017
+# Desired output: a linear vespagram plot
+
+import obspy
+from obspy.clients.fdsn import Client
+from obspy.core.inventory import read_inventory
+import matplotlib.cm as cm
+import matplotlib.pyplot as plt
+from obspy.geodetics.base import locations2degrees
+import numpy as np
+import matplotlib
+from obspy.taup import TauPyModel
+from itertools import izip_longest
+
+##############################################################################
+
+def get_stations_waveforms(network, stations, channel, event_time, waveform_start, waveform_end):
+    
+    """
+    Retrieve an inventory of stations and a stream of waveforms from IRIS
+    
+    Args:
+        network:        String of ONE network
+        stations:       Comma-separated string of station codes in network
+        channel:        String of channel name
+        event_time:     obspy.UTCDateTime of event
+        waveform_start: Integer seconds after event_time to start waveform
+        waveform_end:   Integer seconds after event_time to end waveform
+       
+    Returns: obspy.Inventory and obspy.Stream for a chosen event
+    """
+    
+    # Retrieve the information
+    c = Client("IRIS")
+    inv = c.get_stations(network=network, station=stations, channel=channel, level="response")
+    st = c.get_waveforms(network=network, station=stations, location="", channel=channel, starttime=event_time+waveform_start, endtime=event_time+waveform_end) # Units of seconds
+
+    # Filter, remove the instrument response, normalize the data values to a maximum value of 1
+    st.attach_response(inv)
+    st.detrend("linear")
+    pre_filt = [0.005, 0.04, 5.0, 6.0]
+    st.remove_response(inventory=inv, pre_filt=pre_filt, output="DISP")
+    st.normalize()
+    
+    return inv, st
+
+##############################################################################
+    
+def make_record_section(stream, network, event_lat, event_lon, amp_factor):
+
+    """
+    Makes a plot of data traces arranged by their distance from an event
+    
+    Args:
+        stream:         obspy.Stream object, containing the waveform data
+        network:        String of ONE network
+        event_lat:      Latitude of the event, decimal format
+        event_lon:      Longitude of the event, decimal format
+        amp_factor:     A double format amplification factor for the amplitude of the traces in the plot
+       
+    Returns: a matplotlib figure saved as a .png file
+    """
+    
+    # Clear any existing figures
+    plt.clf()
+    
+    # Make the record section one trace at a time
+    for station, trace in zip(network, stream):
+        dist = locations2degrees(event_lat, event_lon, station.latitude, station.longitude)
+        data = trace.data
+        data *= amp_factor
+        data[:] += dist
+        dt = stream[0].stats.delta
+        time = [i*dt for i in range(len(data))]
+        plt.plot(time, data, '-k', label=station.code)
+        
+    plt.xlabel('Time (sec)')
+    plt.ylabel('Distance (deg)')
+    plt.show()
+    
+    # Save the figure
+    plt.savefig('record_section.png')
+
+##############################################################################
+
+def get_p_slowness(stream, network, event_lat, event_lon, event_depth):
+    
+    """
+    Calculates the slowness of the first p-arrivals across a given group of stations by finding the
+    the slope between the p arrivals of the nearest and furthest stations
+    
+    Args:
+        stream:         obspy.Stream object, containing the waveform data
+        network:        String of ONE network
+        event_lat:      Latitude of the event, decimal format
+        event_lon:      Longitude of the event, decimal format
+        event_depth:    Depth of the event, decimal format, units of km
+    
+    Returns: a slowness value with units of seconds/degree
+    """
+    
+    # Preliminary information
+    distances = []
+    dt = stream[0].stats.delta
+    model = TauPyModel(model='prem')
+    
+    # Calculate the distances of each station from the event
+    for station, trace in zip(network, stream):
+        dist = locations2degrees(event_lat, event_lon, station.latitude, station.longitude)
+        distances.append(dist)
+    
+    # Find the nearest station to the event, calculate its P arrival time
+    nearest_dist = min(distances)
+    nearest_p_time = float((model.get_travel_times(event_depth, nearest_dist, ["P"]))[0].time)
+    #print "P time of nearest station: %f seconds" % nearest_p_time
+    #print "Distance of nearest station: %f degrees" % nearest_dist
+    
+    # Find the furthest station from the event, calculate its P arrival time
+    furthest_dist = max(distances)
+    furthest_p_time = float((model.get_travel_times(event_depth, furthest_dist, ["P"]))[0].time)
+    #print "P time of furtest station: %f seconds" % furthest_p_time
+    #print "Distance of furthest station: %f degrees" % furthest_dist
+    
+    # Calculate the slope between these two time/distance points
+    velocity = (furthest_dist - nearest_dist)/(furthest_p_time - nearest_p_time)
+    avg_p_slowness = 1.0/velocity
+    #print "Average P slowness, from inside the function: %f seconds/degree" % avg_p_slowness
+    
+    return float(avg_p_slowness)
+
+##############################################################################
+
+def sum_n_lists(LoL, stride):
+    
+    """
+    Sums (element-wise) subsets of lists from a list of lists.
+    
+    Args:
+        Lol:        A list of lists
+        stride:     The number of lists to sum together
+        
+    Returns: a list of numpy arrays
+    
+    """
+    
+    args = [iter(LoL)] * stride
+    
+    sums = []
+    for it in izip_longest(*args):
+        np_arrays = [np.asarray(l) for l in it]
+        
+        np_sum = np.zeros(len(np_arrays[0]))
+        for a in np_arrays:
+            np_sum += a
+        
+        sums.append(np_sum)
+    
+    return sums
+
+##############################################################################
+
+def vespagram_waveforms(stream, network, event_time, event_lat, event_lon, event_depth, avg_p_slowness, delta_slowness, num_samples):
+
+    """
+    Shifts a group of waveforms according to a given slowness and sums them
+    
+    Args:
+        stream:         obspy.Stream object, containing the waveform data
+        network:        String of ONE network
+        event_time:     The time of the event, given in UTCDateTime format
+        event_lat:      Latitude of the event, decimal format
+        event_lon:      Longitude of the event, decimal format
+        event_depth:    Depth of the event, decimal format, units of km
+        avg_slowness:   The average slowness of the P arrivals across the array
+        delta_slowness: The magnitude of the slowness range about the average to search
+        num_samples:    The number of slownesses in the slowness range to sum at  
+       
+    Returns: a list of summed waveforms
+    """
+    
+    # Preliminary information
+    distances = []
+    arrivals = []
+    p_times = []
+    data_shifts = []
+    dt = stream[0].stats.delta
+    model = TauPyModel(model='prem') 
+    
+    # Calculate the distance and P arrival time for each station
+    for station, trace in zip(network, stream):
+        dist = locations2degrees(event_lat, event_lon, station.latitude, station.longitude)
+        distances.append(dist)
+        arrivals.append(model.get_travel_times(event_depth, dist, ["P"]))
+    for arrival in arrivals:
+        p_times.append(arrival[0].time) # [0] corresponds to the first arrival in the list, the P wave
+        
+    # Convert these P arrival times from seconds after the event to seconds after the waveform start
+    for time, trace, i in zip(p_times,stream, range(len(p_times))):
+        p_times[i] = time - (trace.stats.starttime - event_time)
+    
+    # Choose the station closest to the center of the distance range, save its distance and p arrival time
+    avg_dist = float(sum(distances))/len(distances)
+    ref_distance = min(distances, key=lambda x:abs(x-avg_dist))
+    ref_time = p_times[distances.index(ref_distance)]
+    
+    # Define a vector of slowness values to sum over
+    slownesses = np.linspace(avg_p_slowness-delta_slowness, avg_p_slowness+delta_slowness, num_samples)
+    
+    # For each of the slowness values, shift the waveforms and sum them
+    for slowness in slownesses:
+        for trace, dist in zip(stream, distances):
+            if dist == ref_distance:
+                slice_index = int((ref_time)/dt)
+                data_shifts.append(trace.data[slice_index:])
+            else:
+                cross_pt = (dist-ref_distance)*slowness+ref_time
+                slice_index = int(cross_pt/dt)
+                data_shifts.append(trace.data[slice_index:])
+        
+    # Find the shortest trace in the matrix of shifted data
+    short_trace_len = min([len(x) for x in data_shifts])
+    
+    # Trim all traces to this shortest trace length
+    short_traces = np.zeros((len(data_shifts),short_trace_len))
+    for data in data_shifts:
+        short_traces[i] = np.array(data[:short_trace_len])
+        
+    # Sum sets of traces that correspond to the same slowness values
+    #traces_sum = np.zeros((len(slownesses),short_trace_len))
+    traces_sum = np.asarray(sum_n_lists(short_traces,len(stream)))
+    print "traces_sum shape: {}".format(traces_sum.shape)    
+    
+    # Find the slowness value closest to the average P slowness, and normalize all traces to that trace
+    #ref_slowness = min(slownesses, key=lambda x:abs(x-avg_slowness))
+    #ref_slowness_index = slownesses.index(ref_slowness)
+    #normalization_factor = np.max(traces_sum[ref_slowness_index,:])
+    
+    return slownesses, traces_sum
+    
+##############################################################################
+
+def plot_vespagram(stream, slownesses, traces_sums, is_wiggle):
+    
+    """
+    Takes a matrix of waveforms at different slownesses and plots it as either a wiggle or contour plot.
+    
+    Args:
+        stream:         obspy.Stream object, containing the waveform data
+        slownesses:     An array of slownesses; returned by function vespagram_waveforms, units of sec/deg
+        traces_sums:    A list of lists, where each sub-list is a waveform needed for the vespagram
+        is_wiggle:      A boolean value where "True" produces wiggle plot and "False" produces contour plot
+    
+    Returns: a vespagram plot
+    """
+    
+    # Preliminary information
+    dt = stream[0].stats.delta
+    time = [i*dt for i in range(len(traces_sums[0]))]
+    plt.clf()
+    
+    # Wiggle plot option:
+    amp_factor = 0.1
+    if is_wiggle is True:
+        for slowness, trace in zip(slownesses, traces_sums):
+            trace = trace * amp_factor 
+            trace = np.array(trace)
+            for i in range(len(trace)):
+                trace[i] += slowness
+            plt.plot(time, trace, '-k')
+    
+        plt.xlim(min(time), max(time))
+        plt.ylim(min(slownesses)-0.1, max(slownesses)+0.1)
+        plt.xlabel('Time (sec)')
+        plt.ylabel('Slowness (sec/deg)')
+        plt.show()
+    # Contour plot option:
+    else:
+        trace_matrix = np.zeros((len(slownesses), len(traces_sums.T)))
+        X, Y = np.meshgrid(time, slownesses)
+        for i in range(len(slownesses)):
+            trace_matrix[i,:] = traces_sums[i,:]
+        
+        matplotlib.rcParams['contour.negative_linestyle'] = 'solid'
+        plt.contour(X, Y, trace_matrix, 6, colors='k')
+        
+        plt.xlim(min(time), max(time))
+        plt.ylim(min(slownesses), max(slownesses))
+        plt.xlabel('Time (sec)')
+        plt.ylabel('Slowness (sec/deg)')
+        plt.show()
+
+##############################################################################
+
+# The following code will run if this file is executed as a script
+if __name__ == "__main__":
+
+    print " "
+    
+    # Define the time and location of the event
+    event_time = obspy.UTCDateTime("2013-05-24T14:56:31")
+    event_lat = 52.1357
+    event_lon = 151.5688
+    event_depth = 632.0
+    
+    # Get the theoretical arrival times of each phase using TauPy
+    model = TauPyModel(model='prem')
+    arrivals = model.get_travel_times(632.0, 82.87, ["P"])
+    P_arrival_time = arrivals[0].time
+    
+    # Use the get_stations_waveforms function to retrieve station information and data
+    inv, st = get_stations_waveforms("Z9", \
+                                     "W08,W09,W10,W11,W13,W14,W15A,W16,W18,W19", \
+                                     "BHZ", \
+                                     event_time, \
+                                     P_arrival_time-30.0, \
+                                     P_arrival_time+60.0)
+    print "Got %d stations and waveforms.\n" % len(inv[0])
+    
+    # Use the make_record_section function to make and save the record section
+    #make_record_section(st, inv[0], event_lat, event_lon, 0.1)
+    #print "Made record section. \n"
+    
+    # Use the get_p_slowness function to calculate the average P arrival slowness across the array
+    avg_p_slowness = get_p_slowness(st, \
+                                    inv[0], \
+                                    event_lat, \
+                                    event_lon, \
+                                    event_depth)
+    print "Calculated the average P-wave slowness: %f seconds/degree \n" % avg_p_slowness
+
+    # Use the vespagram_waveforms function to calculate a waveform at each slowness
+    delta_slowness = 1.0
+    num_samples = 20
+    slownesses, traces_sums = vespagram_waveforms(st, \
+                                                  inv[0], \
+                                                  event_time, \
+                                                  event_lat, \
+                                                  event_lon, \
+                                                  event_depth, \
+                                                  avg_p_slowness, \
+                                                  delta_slowness, \
+                                                  num_samples)
+    print "Calculated the slowness array and vespagram waveforms. \n"
+    
+    # Use the plotting function to produce a vespagram
+    plot_vespagram(st, \
+                    slownesses, \
+                   traces_sums, \
+                   True)
+    print "Plotted vespagram! \n"

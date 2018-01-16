@@ -1,0 +1,225 @@
+# Created by M. Kelley on 10 November 2017
+# Output: a linear contour vespagram
+
+# Import the necessary packages, etc.
+import obspy
+from obspy.clients.fdsn import Client
+from obspy.core.inventory import read_inventory
+import matplotlib.pyplot as plt
+from obspy.geodetics.base import locations2degrees
+
+c = Client("IRIS")
+
+# Define the time of the event
+event_time = obspy.UTCDateTime("2013-05-24T14:56:31")
+
+# Save the event latitude and longitude (FIX THIS LATER: I can see the lat and lon in the Origin object but can't access it with the line below)
+# event_lat = cat[0].origins.latitude
+event_lat = 52.1357
+event_lon = 151.5688
+
+# Make an inventory of stations that detected this event
+# For this test code: the Pilbara Seismic Array in Australia - 13 stations
+print " "
+print "Finding stations..."
+inv = c.get_stations(network="CI", station="DAN,TUQ,SHO,GRA", channel="BHZ", level="response")
+print "Stations found!"
+print " "
+print inv
+
+# Make a stream of waveforms from each of the stations in the above inventory
+# P arrivals all between 9mins20sec and 9mins40sec after the event
+# Waveform start: 9 minutes after the event (~20 seconds before the first P arrival)
+# Waveform end: 20 minutes after the event (goal is to capture all those later arrivals)
+print " "
+print "Finding waveforms..."
+st = c.get_waveforms(network="CI", station="DAN,TUQ,SHO,GRA", location="", channel="BHZ", starttime=event_time+540, endtime=event_time+1200) # Units of seconds
+print str(len(st)) + " waveforms found!"
+print " "
+print st
+
+# Remove the instrument response from the data in the stream
+print " "
+print "Removing instrument response..."
+st.attach_response(inv)
+st.detrend("linear")
+pre_filt = [0.005, 0.04, 5.0, 6.0]
+st.remove_response(inventory=inv, pre_filt=pre_filt, output="DISP")
+st.normalize()
+print "Instrument response removed!"
+print " "
+
+#######################################
+
+def stack_waveforms(stream, network, event_lat, event_lon):
+    
+    # Empty lists of things I need to make the vespagram later
+    names = []
+    datas = []
+    dists = []
+    
+    # Fill the lists
+    for station, trace in zip(network, stream):
+        names.append(station.code)
+        datas.append(trace.data)
+        dists.append(locations2degrees(event_lat, event_lon, station.latitude, station.longitude))
+        
+    # Some info
+    dt = stream[0].stats.delta
+    
+#######################################
+    
+def make_record_section(stream, network, event_lat, event_lon, amp_factor):
+    
+    # Clear any existing figures
+    plt.clf()
+    
+    # Make the record section one trace at a time
+    for station, trace in zip(network, stream):
+        
+        dist = locations2degrees(event_lat, event_lon, station.latitude, station.longitude)
+        data = trace.data
+        data *= amp_factor
+        data[:] += dist
+        dt = stream[0].stats.delta
+        time = [i*dt for i in range(len(data))]
+        plt.plot(time, data, label=station.code)
+    
+    # Save the figure
+    plt.savefig('record_section.png')
+
+#######################################
+
+# Save the stations from the network (from the inventory)
+dt = st[0].stats.delta
+time = []
+for i in range(len(st[0].data)):
+	time.append(float(i*dt))
+net = inv[0]
+DAN = net[0]
+GRA = net[1]
+SHO = net[2]
+TUQ = net[3]
+
+# Station DAN info
+DAN_data = st[0].data
+DAN_lat = DAN.latitude
+DAN_lon = DAN.longitude
+DAN_dist = locations2degrees(event_lat, event_lon, DAN_lat, DAN_lon)
+
+# Station GRA info
+GRA_data = st[1].data
+GRA_lat = GRA.latitude
+GRA_lon = GRA.longitude
+GRA_dist = locations2degrees(event_lat, event_lon, GRA_lat, GRA_lon)
+
+# Station SHO info
+SHO_data = st[2].data
+SHO_lat = SHO.latitude
+SHO_lon = SHO.longitude
+SHO_dist = locations2degrees(event_lat, event_lon, SHO_lat, SHO_lon)
+
+# Station TUQ info
+TUQ_data = st[3].data
+TUQ_lat = TUQ.latitude
+TUQ_lon = TUQ.longitude
+TUQ_dist = locations2degrees(event_lat, event_lon, TUQ_lat, TUQ_lon)
+
+# Reference for distances in units of epicentral degrees
+distances = [DAN_dist, GRA_dist, SHO_dist, TUQ_dist]
+print distances
+
+
+make_record_section(st, inv[0], event_lat, event_lon, 1.0)
+"""
+# Set each of the data traces at their respective distance values
+# Include amplification to see the traces in the plot
+amp_factor = 1
+for i in range(len(DAN_data)):
+	DAN_data[i] *= amp_factor
+	DAN_data[i] += DAN_dist
+for i in range(len(GRA_data)):
+	GRA_data[i] *= amp_factor
+	GRA_data[i] += GRA_dist
+for i in range(len(SHO_data)):
+	SHO_data[i] *= amp_factor
+	SHO_data[i] += SHO_dist
+for i in range(len(TUQ_data)):
+	TUQ_data[i] *= amp_factor
+	TUQ_data[i] += TUQ_dist
+
+
+# FIX THIS LATER: Why is the magnitude of each trace on the plot so much larger than the ~1.4 that they should be?
+
+# Make the record section plot
+#plt.plot(time, DAN_data, label='DAN')
+#plt.plot(time, GRA_data, label='GRA')
+#plt.plot(time, SHO_data, label='SHO')
+#plt.plot(time, TUQ_data, label='TUQ')
+"""
+
+# Calculate the regular sum trace
+sum_no_shift = []
+for i in range(len(DAN_data)):
+	sum_no_shift.append(DAN_data[i] + GRA_data[i] + SHO_data[i] + TUQ_data[i])
+
+# Calculate an initial celerity line, form y=mx+b
+celerity = []
+for i in range(len(time)):
+	celerity.append(0.16098*time[i] + 57.97682)
+#plt.plot(time, celerity, label='celerity line')
+#plt.xlabel('Time (sec)')
+#plt.ylabel('Distance (deg)')
+#plt.ylim(61, 66)
+#plt.legend()
+#plt.show()
+
+# Start shifting the traces around
+
+# Calculate the x values for the celerity line for the initial P arrivals
+shifts_celerity = []
+for i in range(len(distances)):
+	shifts_celerity.append((distances[i]-57.97682)/0.16098)
+print shifts_celerity
+
+# Slice the data traces according to these x values
+DAN_slice = int(shifts_celerity[0]*40)
+GRA_slice = int(shifts_celerity[1]*40)
+SHO_slice = int(shifts_celerity[2]*40)
+TUQ_slice = int(shifts_celerity[3]*40)
+
+DAN_data_shift = DAN_data[DAN_slice:]
+GRA_data_shift = GRA_data[GRA_slice:]
+SHO_data_shift = SHO_data[SHO_slice:]
+TUQ_data_shift = TUQ_data[TUQ_slice:]
+
+# Trim the data traces to be the same length as the shortest one
+short_trace = len(DAN_data_shift)
+DAN_data_shift = DAN_data_shift[:short_trace]
+GRA_data_shift = GRA_data_shift[:short_trace]
+SHO_data_shift = SHO_data_shift[:short_trace]
+TUQ_data_shift = TUQ_data_shift[:short_trace]
+
+# Calculate the sum of these shifted traces
+sums_celerity = []
+for i in range(len(TUQ_data_shift)):
+	sums_celerity.append(DAN_data_shift[i] + GRA_data_shift[i] + SHO_data_shift[i] + TUQ_data_shift[i])
+plt.plot(sums_celerity)
+plt.show()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
