@@ -69,7 +69,6 @@ def make_record_section(stream, network, event_lat, event_lon, amp_factor):
         data = trace.data
         data *= amp_factor
         data[:] += dist
-        print dist
         dt = stream[0].stats.delta
         time = [i*dt for i in range(len(data))]
         plt.plot(time, data, '-k', label=station.code)
@@ -304,15 +303,14 @@ if __name__ == "__main__":
                                       distance_in_degree = 82.65, 
                                       phase_list = ["P", "PP", "PcP"])
     p_arrival_time = arrivals[0].time # This time is relative to the event time
-    print p_arrival_time
     
     # Test get_stations_waveforms function
-    inv, st = get_stations_waveforms("XO", 
-                                     "LC15,LD16,LE17,LF18,LG19,LH20,LH22,LI21", 
+    inv, st = get_stations_waveforms("Z9", 
+                                     "W08,W09,W10,W11,W13,W14,W15A,W16,W18,W19", 
                                      "BHZ", 
                                      event_time, 
-                                     p_arrival_time-60.0, 
-                                     p_arrival_time+30.0)
+                                     p_arrival_time-30.0, 
+                                     p_arrival_time+60.0)
     print "Got %d stations and waveforms." % len(inv[0])
 
     # Test the make_record_section function
@@ -328,9 +326,9 @@ if __name__ == "__main__":
                                                        event_lat, 
                                                        event_lon, 
                                                        event_depth, 
-                                                       1.5, 
-                                                       1.5, 
-                                                       15)
+                                                       0.1, 
+                                                       1.9, 
+                                                       20)
     print "Got %d slowness/intercept pairs." % len(slowness_intercepts)
 
     # Use the stack_waveforms function to make a summed trace for each of the defined slopes
